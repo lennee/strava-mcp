@@ -1,6 +1,7 @@
 use crate::models::StravaActivity;
 use anyhow::{Context, Result};
 use reqwest::Client;
+use serde_json;
 
 const BASE_URL: &str = "https://www.strava.com/api/v3";
 
@@ -58,10 +59,24 @@ impl StravaClient {
             anyhow::bail!("Strava API error ({}): {}", status, body);
         }
 
-        let activities = response
-            .json::<Vec<StravaActivity>>()
+        // Get the response text first for better error diagnostics
+        let response_text = response
+            .text()
             .await
-            .context("Failed to parse Strava API response")?;
+            .context("Failed to read response body")?;
+
+        // Try to parse the JSON
+        let activities = serde_json::from_str::<Vec<StravaActivity>>(&response_text)
+            .map_err(|e| {
+                // Log the full response for debugging
+                eprintln!("Parse error: {}", e);
+                eprintln!("Full response body: {}", &response_text);
+                anyhow::anyhow!(
+                    "Failed to parse Strava API response. Parse error: {}. Response body (first 1000 chars): {}",
+                    e,
+                    &response_text[..response_text.len().min(1000)]
+                )
+            })?;
 
         Ok(activities)
     }
