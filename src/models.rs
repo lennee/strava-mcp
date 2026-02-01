@@ -15,15 +15,65 @@ pub struct StravaActivity {
     pub distance: f64,     // meters
     pub moving_time: u32,  // seconds
     pub elapsed_time: u32, // seconds
-    pub total_elevation_gain: f64,
-    pub average_speed: f64, // meters per second
-    pub max_speed: f64,     // meters per second
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub total_elevation_gain: f64, // meters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_speed: Option<f64>, // meters per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_speed: Option<f64>,     // meters per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub average_heartrate: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_heartrate: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub suffer_score: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffer_score: Option<f64>,
+    // Additional fields that may be present in the API response - all optional
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub athlete: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_state: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc_offset: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achievement_count: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kudos_count: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_count: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub athlete_count: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_count: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trainer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flagged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_cadence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_watts: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_watts: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weighted_average_watts: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kilojoules: Option<f64>,
 }
 
 impl StravaActivity {
@@ -103,11 +153,34 @@ mod tests {
             moving_time: 1800,
             elapsed_time: 1900,
             total_elevation_gain: 50.0,
-            average_speed: 2.77,
-            max_speed: 3.5,
+            average_speed: Some(2.77),
+            max_speed: Some(3.5),
             average_heartrate: Some(150.0),
             max_heartrate: Some(180.0),
-            suffer_score: Some(50),
+            suffer_score: Some(50.0),
+            resource_state: Some(2),
+            athlete: None,
+            device_name: None,
+            timezone: None,
+            utc_offset: None,
+            location_city: None,
+            location_state: None,
+            location_country: None,
+            achievement_count: Some(0),
+            kudos_count: Some(0),
+            comment_count: Some(0),
+            athlete_count: Some(1.0),
+            photo_count: Some(0),
+            trainer: Some(false),
+            commute: Some(false),
+            manual: Some(false),
+            private: Some(false),
+            flagged: Some(false),
+            average_cadence: None,
+            average_watts: None,
+            max_watts: None,
+            weighted_average_watts: None,
+            kilojoules: None,
         };
         assert!(run.is_run());
 
@@ -120,7 +193,7 @@ mod tests {
         let ride = StravaActivity {
             activity_type: "Ride".to_string(),
             sport_type: "MountainBikeRide".to_string(),
-            ..run
+            ..run.clone()
         };
         assert!(!ride.is_run());
     }

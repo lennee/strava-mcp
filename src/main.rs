@@ -97,10 +97,12 @@ impl StravaMcpServer {
                 "- **Duration:** {}\n",
                 format_duration(run.moving_time)
             ));
-            output.push_str(&format!(
-                "- **Pace:** {}/km\n",
-                format_pace(run.average_speed)
-            ));
+            if let Some(avg_speed) = run.average_speed {
+                output.push_str(&format!(
+                    "- **Pace:** {}/km\n",
+                    format_pace(avg_speed)
+                ));
+            }
             output.push_str(&format!(
                 "- **Elevation Gain:** {:.0}m\n",
                 run.total_elevation_gain
@@ -188,10 +190,12 @@ impl StravaMcpServer {
                 "- **Duration:** {}\n",
                 format_duration(run.moving_time)
             ));
-            output.push_str(&format!(
-                "- **Pace:** {}/km\n",
-                format_pace(run.average_speed)
-            ));
+            if let Some(avg_speed) = run.average_speed {
+                output.push_str(&format!(
+                    "- **Pace:** {}/km\n",
+                    format_pace(avg_speed)
+                ));
+            }
 
             if let Some(hr) = run.average_heartrate {
                 output.push_str(&format!("- **Average HR:** {:.0} bpm\n", hr));
@@ -266,8 +270,8 @@ impl StravaMcpServer {
         let total_time: u32 = runs.iter().map(|r| r.moving_time).sum();
         let total_elevation: f64 = runs.iter().map(|r| r.total_elevation_gain).sum();
 
-        // Calculate average pace
-        let avg_pace = if total_time > 0 {
+        // Calculate average pace from total distance and time
+        let avg_pace = if total_time > 0 && total_distance > 0.0 {
             total_distance / total_time as f64
         } else {
             0.0
