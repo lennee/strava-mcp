@@ -41,21 +41,6 @@ impl StravaMcpServer {
         }
     }
 
-    /// Get an authenticated client and persist any refreshed tokens
-    async fn get_client(&self) -> Result<strava_api::Client, McpError> {
-        // Get client (will auto-refresh token if needed)
-        let client = self.auth_client.client().await.map_err(McpError::internal)?;
-
-        // Persist the token if it was refreshed
-        if let Some(token) = self.auth_client.get_token().await {
-            if let Ok(storage) = TokenStorage::default_location() {
-                // Ignore save errors (don't fail the request if persistence fails)
-                let _ = storage.save(&token);
-            }
-        }
-
-        Ok(client)
-    }
 
     #[tool(description = "Get running activities for a specific date (YYYY-MM-DD format)")]
     async fn get_runs_for_date(
@@ -72,8 +57,8 @@ impl StravaMcpServer {
             ));
         }
 
-        // Get authenticated client (with auto token refresh and persistence)
-        let client = self.get_client().await?;
+        // Get authenticated client (will auto-refresh and auto-save token if needed)
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
 
         // Parse and validate date
         let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
@@ -202,8 +187,8 @@ impl StravaMcpServer {
             )));
         }
 
-        // Get authenticated client (with auto token refresh and persistence)
-        let client = self.get_client().await?;
+        // Get authenticated client (will auto-refresh and auto-save token if needed)
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
 
         // Fetch activities
         let activities = client
@@ -264,8 +249,8 @@ impl StravaMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
 
-        // Get authenticated client (with auto token refresh and persistence)
-        let client = self.get_client().await?;
+        // Get authenticated client (will auto-refresh and auto-save token if needed)
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
 
         // Determine week start (Monday)
         let week_start = match &params.week_start {
@@ -354,10 +339,10 @@ impl StravaMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
 
-        // First, try to get a client with the existing token (will auto-refresh if needed)
-        match self.get_client().await {
+        // First, try to get a client with the existing token (will auto-refresh and auto-save if needed)
+        match self.auth_client.client().await {
             Ok(_) => {
-                // Token exists and is valid (or was successfully refreshed)
+                // Token exists and is valid (or was successfully refreshed and saved)
                 return Ok(CallToolResult::success(vec![Content::text(
                     "Already authorized! Your token is valid and has been refreshed if needed.".to_string(),
                 )]));
@@ -410,19 +395,14 @@ impl StravaMcpServer {
         }
 
         // Perform full OAuth authorization flow (opens browser)
+        // Token will be automatically saved to ~/.strava/token.json
         self.auth_client
             .authorize(port, scope)
             .await
             .map_err(McpError::internal)?;
 
-        // Save token for persistence
-        let storage = TokenStorage::default_location().map_err(McpError::internal)?;
-        if let Some(token) = self.auth_client.get_token().await {
-            storage.save(&token).map_err(McpError::internal)?;
-        }
-
         Ok(CallToolResult::success(vec![Content::text(
-            "Authorization successful! Token saved for future use.".to_string(),
+            "Authorization successful! Token automatically saved for future use.".to_string(),
         )]))
     }
 }
@@ -509,20 +489,22 @@ async fn main() -> Result<()> {
     let config = OAuthConfig::from_env()
         .context("Failed to load OAuth configuration. Please set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET environment variables.")?;
 
-    // Load or create authenticated client with token persistence
+    // Load or create authenticated client with automatic token persistence
     let storage = TokenStorage::default_location()
         .context("Failed to get token storage location")?;
 
     let auth_client = if storage.exists() {
-        // Load existing token from storage
+        // Load existing token from storage with auto-persistence enabled
         let token = storage.load()
             .context("Failed to load saved token")?;
         eprintln!("Loaded saved authentication token from ~/.strava/token.json");
-        AuthenticatedClient::with_token(config, token)
+        AuthenticatedClient::with_token_and_persistence(config, token)
+            .context("Failed to enable token persistence")?
     } else {
         // No saved token, will need to authorize on first tool call
         eprintln!("No saved token found. Use the 'authorize' tool to authenticate.");
-        AuthenticatedClient::new(config)
+        AuthenticatedClient::new_with_persistence(config)
+            .context("Failed to enable token persistence")?
     };
 
     // Create MCP server
