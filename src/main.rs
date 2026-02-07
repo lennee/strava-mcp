@@ -1,12 +1,8 @@
-mod models;
-mod oauth;
-mod strava_api;
 mod utils;
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
-use models::OAuthConfig;
-use oauth::TokenManager;
+use clap::Parser;
 use rmcp::{
     handler::server::tool::ToolRouter,
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
@@ -15,25 +11,50 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
-use strava_api::StravaClient;
+use strava_api::{AuthenticatedClient, OAuthConfig, TokenStorage};
 use tokio::io::{stdin, stdout};
 use utils::{format_distance, format_duration, format_pace};
 
+// Helper trait for checking if an activity is a run
+trait ActivityExt {
+    fn is_run(&self) -> bool;
+}
+
+impl ActivityExt for strava_api::SummaryActivity {
+    fn is_run(&self) -> bool {
+        self.activity_type == "Run" || self.sport_type == "Run" || self.sport_type == "TrailRun"
+    }
+}
+
 #[derive(Clone)]
 struct StravaMcpServer {
-    token_manager: Arc<TokenManager>,
-    strava_client: Arc<StravaClient>,
+    auth_client: Arc<AuthenticatedClient>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl StravaMcpServer {
-    fn new(token_manager: TokenManager, strava_client: StravaClient) -> Self {
+    fn new(auth_client: AuthenticatedClient) -> Self {
         Self {
-            token_manager: Arc::new(token_manager),
-            strava_client: Arc::new(strava_client),
+            auth_client: Arc::new(auth_client),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Get an authenticated client and persist any refreshed tokens
+    async fn get_client(&self) -> Result<strava_api::Client, McpError> {
+        // Get client (will auto-refresh token if needed)
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
+
+        // Persist the token if it was refreshed
+        if let Some(token) = self.auth_client.get_token().await {
+            if let Ok(storage) = TokenStorage::default_location() {
+                // Ignore save errors (don't fail the request if persistence fails)
+                let _ = storage.save(&token);
+            }
+        }
+
+        Ok(client)
     }
 
     #[tool(description = "Get running activities for a specific date (YYYY-MM-DD format)")]
@@ -43,18 +64,39 @@ impl StravaMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let params = params.0; // Extract inner value
         let date_str = &params.date;
-        let access_token = match &params.access_token {
-            Some(token) => token.clone(),
-            None => self
-                .token_manager
-                .get_valid_access_token()
-                .await
-                .map_err(McpError::internal)?,
-        };
 
-        // Parse date
+        // Validate date string length (prevent excessive parsing)
+        if date_str.len() > 10 {
+            return Err(McpError::invalid_params_no_data(
+                "Date must be in YYYY-MM-DD format (10 characters max)",
+            ));
+        }
+
+        // Get authenticated client (with auto token refresh and persistence)
+        let client = self.get_client().await?;
+
+        // Parse and validate date
         let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-            .map_err(|e| McpError::invalid_params_no_data(format!("Invalid date format: {}", e)))?;
+            .map_err(|e| McpError::invalid_params_no_data(format!("Invalid date format (expected YYYY-MM-DD): {}", e)))?;
+
+        // Validate date is within reasonable range (Strava founded in 2009)
+        let min_date = NaiveDate::from_ymd_opt(2009, 1, 1)
+            .ok_or_else(|| McpError::internal("Failed to create min date"))?;
+        let max_date = Utc::now().date_naive() + Duration::days(1); // Allow today + 1 day for timezone differences
+
+        if date < min_date {
+            return Err(McpError::invalid_params_no_data(format!(
+                "Date {} is before Strava existed (min: 2009-01-01)",
+                date
+            )));
+        }
+
+        if date > max_date {
+            return Err(McpError::invalid_params_no_data(format!(
+                "Date {} is in the future (max: {})",
+                date, max_date
+            )));
+        }
 
         // Calculate day boundaries in UTC
         let start_of_day = date
@@ -65,9 +107,8 @@ impl StravaMcpServer {
         let end_of_day = start_of_day + 86400; // 24 hours
 
         // Fetch activities
-        let activities = self
-            .strava_client
-            .fetch_activities(&access_token, Some(start_of_day), Some(end_of_day))
+        let activities = client
+            .list_athlete_activities(Some(start_of_day), Some(end_of_day), 1, 200)
             .await
             .map_err(McpError::internal)?;
 
@@ -85,7 +126,7 @@ impl StravaMcpServer {
         let mut output = format!("# Runs for {}\n\n", date_str);
 
         let mut total_distance = 0.0;
-        let mut total_time = 0u32;
+        let mut total_time = 0i32;
 
         for run in &runs {
             output.push_str(&format!("## {}\n", run.name));
@@ -144,20 +185,29 @@ impl StravaMcpServer {
         params: rmcp::handler::server::wrapper::Parameters<GetRecentRunsParams>,
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
-        let limit = params.limit.unwrap_or(5);
-        let access_token = match &params.access_token {
-            Some(token) => token.clone(),
-            None => self
-                .token_manager
-                .get_valid_access_token()
-                .await
-                .map_err(McpError::internal)?,
-        };
+
+        // Validate and bound the limit parameter (prevent DoS)
+        const MAX_LIMIT: usize = 100;
+        const DEFAULT_LIMIT: usize = 5;
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        if limit == 0 {
+            return Err(McpError::invalid_params_no_data("limit must be greater than 0"));
+        }
+
+        if limit > MAX_LIMIT {
+            return Err(McpError::invalid_params_no_data(format!(
+                "limit cannot exceed {} (requested: {})",
+                MAX_LIMIT, limit
+            )));
+        }
+
+        // Get authenticated client (with auto token refresh and persistence)
+        let client = self.get_client().await?;
 
         // Fetch activities
-        let activities = self
-            .strava_client
-            .fetch_activities(&access_token, None, None)
+        let activities = client
+            .list_athlete_activities(None, None, 1, 200)
             .await
             .map_err(McpError::internal)?;
 
@@ -213,14 +263,9 @@ impl StravaMcpServer {
         params: rmcp::handler::server::wrapper::Parameters<GetWeeklySummaryParams>,
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
-        let access_token = match &params.access_token {
-            Some(token) => token.clone(),
-            None => self
-                .token_manager
-                .get_valid_access_token()
-                .await
-                .map_err(McpError::internal)?,
-        };
+
+        // Get authenticated client (with auto token refresh and persistence)
+        let client = self.get_client().await?;
 
         // Determine week start (Monday)
         let week_start = match &params.week_start {
@@ -244,12 +289,12 @@ impl StravaMcpServer {
         let week_end_timestamp = week_start_timestamp + (7 * 86400); // 7 days
 
         // Fetch activities
-        let activities = self
-            .strava_client
-            .fetch_activities(
-                &access_token,
+        let activities = client
+            .list_athlete_activities(
                 Some(week_start_timestamp),
                 Some(week_end_timestamp),
+                1,
+                200,
             )
             .await
             .map_err(McpError::internal)?;
@@ -267,7 +312,7 @@ impl StravaMcpServer {
         // Calculate aggregates
         let total_runs = runs.len();
         let total_distance: f64 = runs.iter().map(|r| r.distance).sum();
-        let total_time: u32 = runs.iter().map(|r| r.moving_time).sum();
+        let total_time: i32 = runs.iter().map(|r| r.moving_time).sum();
         let total_elevation: f64 = runs.iter().map(|r| r.total_elevation_gain).sum();
 
         // Calculate average pace from total distance and time
@@ -308,16 +353,77 @@ impl StravaMcpServer {
         params: rmcp::handler::server::wrapper::Parameters<AuthorizeParams>,
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
-        let port = params.port.unwrap_or(8089);
+
+        // First, try to get a client with the existing token (will auto-refresh if needed)
+        match self.get_client().await {
+            Ok(_) => {
+                // Token exists and is valid (or was successfully refreshed)
+                return Ok(CallToolResult::success(vec![Content::text(
+                    "Already authorized! Your token is valid and has been refreshed if needed.".to_string(),
+                )]));
+            }
+            Err(_) => {
+                // Token doesn't exist or refresh failed - need full OAuth flow
+            }
+        }
+
+        // Validate port parameter (prevent privilege escalation)
+        const MIN_PORT: u16 = 1024; // Avoid privileged ports
+        const MAX_PORT: u16 = 65535;
+        const DEFAULT_PORT: u16 = 8089;
+
+        let port = params.port.unwrap_or(DEFAULT_PORT);
+
+        if port < MIN_PORT {
+            return Err(McpError::invalid_params_no_data(format!(
+                "port must be >= {} (requested: {}). Ports below 1024 require elevated privileges.",
+                MIN_PORT, port
+            )));
+        }
+
+        if port > MAX_PORT {
+            return Err(McpError::invalid_params_no_data(format!(
+                "port must be <= {} (requested: {})",
+                MAX_PORT, port
+            )));
+        }
+
+        // Validate scope parameter (whitelist allowed scopes)
+        const ALLOWED_SCOPES: &[&str] = &[
+            "read",
+            "read_all",
+            "profile:read_all",
+            "profile:write",
+            "activity:read",
+            "activity:read_all",
+            "activity:write",
+        ];
+
         let scope = params.scope.as_deref().unwrap_or("activity:read_all");
 
-        let result = self
-            .token_manager
+        if !ALLOWED_SCOPES.contains(&scope) {
+            return Err(McpError::invalid_params_no_data(format!(
+                "Invalid scope '{}'. Allowed scopes: {}",
+                scope,
+                ALLOWED_SCOPES.join(", ")
+            )));
+        }
+
+        // Perform full OAuth authorization flow (opens browser)
+        self.auth_client
             .authorize(port, scope)
             .await
             .map_err(McpError::internal)?;
 
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+        // Save token for persistence
+        let storage = TokenStorage::default_location().map_err(McpError::internal)?;
+        if let Some(token) = self.auth_client.get_token().await {
+            storage.save(&token).map_err(McpError::internal)?;
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            "Authorization successful! Token saved for future use.".to_string(),
+        )]))
     }
 }
 
@@ -337,30 +443,18 @@ impl ServerHandler for StravaMcpServer {
 struct GetRunsForDateParams {
     #[schemars(description = "Date in YYYY-MM-DD format")]
     date: String,
-    #[schemars(
-        description = "Optional Strava access token (uses environment token if not provided)"
-    )]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetRecentRunsParams {
     #[schemars(description = "Number of recent runs to retrieve (default: 5)")]
     limit: Option<usize>,
-    #[schemars(
-        description = "Optional Strava access token (uses environment token if not provided)"
-    )]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetWeeklySummaryParams {
     #[schemars(description = "Start of week in YYYY-MM-DD format (defaults to current Monday)")]
     week_start: Option<String>,
-    #[schemars(
-        description = "Optional Strava access token (uses environment token if not provided)"
-    )]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -387,23 +481,52 @@ impl McpErrorExt for McpError {
     }
 }
 
+/// Strava MCP Server - Model Context Protocol server for Strava API integration
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Path to .env file containing STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET
+    #[arg(long)]
+    env_file: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load environment variables
-    dotenvy::dotenv().ok();
+    // Parse command-line arguments
+    let cli = Cli::parse();
+
+    // Load environment variables from specified file or default location
+    if let Some(env_file) = cli.env_file {
+        dotenvy::from_filename(&env_file)
+            .with_context(|| format!("Failed to load .env file from: {}", env_file))?;
+        eprintln!("Loaded environment from: {}", env_file);
+    } else {
+        // Try to load from current directory, but don't fail if not found
+        dotenvy::dotenv().ok();
+    }
 
     // Load OAuth config
     let config = OAuthConfig::from_env()
         .context("Failed to load OAuth configuration. Please set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET environment variables.")?;
 
-    // Initialize token manager
-    let token_manager = TokenManager::new(config).context("Failed to initialize token manager")?;
+    // Load or create authenticated client with token persistence
+    let storage = TokenStorage::default_location()
+        .context("Failed to get token storage location")?;
 
-    // Initialize Strava client
-    let strava_client = StravaClient::new().context("Failed to initialize Strava client")?;
+    let auth_client = if storage.exists() {
+        // Load existing token from storage
+        let token = storage.load()
+            .context("Failed to load saved token")?;
+        eprintln!("Loaded saved authentication token from ~/.strava/token.json");
+        AuthenticatedClient::with_token(config, token)
+    } else {
+        // No saved token, will need to authorize on first tool call
+        eprintln!("No saved token found. Use the 'authorize' tool to authenticate.");
+        AuthenticatedClient::new(config)
+    };
 
     // Create MCP server
-    let server = StravaMcpServer::new(token_manager, strava_client);
+    let server = StravaMcpServer::new(auth_client);
 
     // Create stdio transport
     let transport = (stdin(), stdout());

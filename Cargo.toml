@@ -12,19 +12,14 @@ name = "strava-mcp"
 path = "src/main.rs"
 
 [dependencies]
+# Strava API client (with OAuth support)
+strava-api = { path = "../strava-api", features = ["oauth"] }
+
 # MCP SDK
 rmcp = { version = "0.14", features = ["server"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-
-# HTTP client
-reqwest = { version = "0.12", features = ["json"] }
-
-# HTTP server for OAuth callback
-axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
 
 # Serialization and schemas
 serde = { version = "1.0", features = ["derive"] }
@@ -37,15 +32,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # Environment variables
 dotenvy = "0.15"
 
-# Browser opening
-open = "5.0"
-
 # Error handling
 anyhow = "1.0"
-thiserror = "2.0"
 
-# URL encoding
-url = "2.5"
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
