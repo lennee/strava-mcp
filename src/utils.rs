@@ -1,5 +1,9 @@
 /// Format duration in seconds to "Xh Ym Zs" format
-pub fn format_duration(seconds: u32) -> String {
+pub fn format_duration(seconds: i32) -> String {
+    if seconds < 0 {
+        return "N/A".to_string();
+    }
+    let seconds = seconds as u32;
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let secs = seconds % 60;
