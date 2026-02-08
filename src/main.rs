@@ -332,6 +332,257 @@ impl StravaMcpServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
+    #[tool(description = "Get running activities for a specific month (YYYY-MM format)")]
+    async fn get_runs_for_month(
+        &self,
+        params: rmcp::handler::server::wrapper::Parameters<GetRunsForMonthParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let month_str = &params.month;
+
+        // Validate month string format
+        if month_str.len() != 7 {
+            return Err(McpError::invalid_params_no_data(
+                "Month must be in YYYY-MM format (7 characters)",
+            ));
+        }
+
+        // Get authenticated client
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
+
+        // Parse month (YYYY-MM format)
+        let parts: Vec<&str> = month_str.split('-').collect();
+        if parts.len() != 2 {
+            return Err(McpError::invalid_params_no_data(
+                "Invalid month format (expected YYYY-MM)",
+            ));
+        }
+
+        let year: i32 = parts[0].parse().map_err(|_| {
+            McpError::invalid_params_no_data("Invalid year in month string")
+        })?;
+        let month: u32 = parts[1].parse().map_err(|_| {
+            McpError::invalid_params_no_data("Invalid month in month string")
+        })?;
+
+        // Validate month range
+        if !(1..=12).contains(&month) {
+            return Err(McpError::invalid_params_no_data(format!(
+                "Month must be between 01 and 12 (got: {})",
+                month
+            )));
+        }
+
+        // Calculate first day of month
+        let month_start = NaiveDate::from_ymd_opt(year, month, 1)
+            .ok_or_else(|| McpError::invalid_params_no_data("Invalid year/month combination"))?;
+
+        // Calculate first day of next month
+        let month_end = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .ok_or_else(|| McpError::internal("Failed to calculate month end"))?;
+
+        // Convert to timestamps
+        let start_timestamp = month_start
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| McpError::internal("Invalid date"))?
+            .and_utc()
+            .timestamp();
+        let end_timestamp = month_end
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| McpError::internal("Invalid date"))?
+            .and_utc()
+            .timestamp();
+
+        // Fetch activities for the month
+        let activities = client
+            .list_athlete_activities(Some(start_timestamp), Some(end_timestamp), 1, 200)
+            .await
+            .map_err(McpError::internal)?;
+
+        // Filter for runs
+        let runs: Vec<_> = activities.iter().filter(|a| a.is_run()).collect();
+
+        if runs.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No runs found for {}",
+                month_str
+            ))]));
+        }
+
+        // Format output
+        let mut output = format!("# Runs for {}\n\n", month_str);
+        output.push_str(&format!("Found {} runs\n\n", runs.len()));
+
+        for run in &runs {
+            // Parse local date for display
+            let date = run.start_date_local.split('T').next().unwrap_or("Unknown");
+
+            output.push_str(&format!("## {} ({})\n", run.name, date));
+            output.push_str(&format!(
+                "- **Distance:** {} km\n",
+                format_distance(run.distance)
+            ));
+            output.push_str(&format!(
+                "- **Duration:** {}\n",
+                format_duration(run.moving_time)
+            ));
+            if let Some(avg_speed) = run.average_speed {
+                output.push_str(&format!(
+                    "- **Pace:** {}/km\n",
+                    format_pace(avg_speed)
+                ));
+            }
+            output.push_str(&format!(
+                "- **Elevation Gain:** {:.0}m\n",
+                run.total_elevation_gain
+            ));
+
+            if let Some(hr) = run.average_heartrate {
+                output.push_str(&format!("- **Average Heart Rate:** {:.0} bpm\n", hr));
+            }
+
+            output.push('\n');
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    #[tool(description = "Get monthly running summary with aggregated statistics")]
+    async fn get_monthly_running_summary(
+        &self,
+        params: rmcp::handler::server::wrapper::Parameters<GetMonthlyRunningSummaryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let month_str = &params.month;
+
+        // Validate month string format
+        if month_str.len() != 7 {
+            return Err(McpError::invalid_params_no_data(
+                "Month must be in YYYY-MM format (7 characters)",
+            ));
+        }
+
+        // Get authenticated client
+        let client = self.auth_client.client().await.map_err(McpError::internal)?;
+
+        // Parse month (YYYY-MM format)
+        let parts: Vec<&str> = month_str.split('-').collect();
+        if parts.len() != 2 {
+            return Err(McpError::invalid_params_no_data(
+                "Invalid month format (expected YYYY-MM)",
+            ));
+        }
+
+        let year: i32 = parts[0].parse().map_err(|_| {
+            McpError::invalid_params_no_data("Invalid year in month string")
+        })?;
+        let month: u32 = parts[1].parse().map_err(|_| {
+            McpError::invalid_params_no_data("Invalid month in month string")
+        })?;
+
+        // Validate month range
+        if !(1..=12).contains(&month) {
+            return Err(McpError::invalid_params_no_data(format!(
+                "Month must be between 01 and 12 (got: {})",
+                month
+            )));
+        }
+
+        // Calculate first day of month
+        let month_start = NaiveDate::from_ymd_opt(year, month, 1)
+            .ok_or_else(|| McpError::invalid_params_no_data("Invalid year/month combination"))?;
+
+        // Calculate first day of next month
+        let month_end = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .ok_or_else(|| McpError::internal("Failed to calculate month end"))?;
+
+        // Convert to timestamps
+        let start_timestamp = month_start
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| McpError::internal("Invalid date"))?
+            .and_utc()
+            .timestamp();
+        let end_timestamp = month_end
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| McpError::internal("Invalid date"))?
+            .and_utc()
+            .timestamp();
+
+        // Fetch activities for the month
+        let activities = client
+            .list_athlete_activities(Some(start_timestamp), Some(end_timestamp), 1, 200)
+            .await
+            .map_err(McpError::internal)?;
+
+        // Filter for runs
+        let runs: Vec<_> = activities.iter().filter(|a| a.is_run()).collect();
+
+        if runs.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No runs found for {}",
+                month_str
+            ))]));
+        }
+
+        // Calculate aggregates
+        let total_runs = runs.len();
+        let total_distance: f64 = runs.iter().map(|r| r.distance).sum();
+        let total_time: i32 = runs.iter().map(|r| r.moving_time).sum();
+        let total_elevation: f64 = runs.iter().map(|r| r.total_elevation_gain).sum();
+
+        // Calculate average pace from total distance and time
+        let avg_pace = if total_time > 0 && total_distance > 0.0 {
+            total_distance / total_time as f64
+        } else {
+            0.0
+        };
+
+        // Format output
+        let mut output = format!("# Monthly Running Summary: {}\n\n", month_str);
+
+        output.push_str(&format!("- **Total Runs:** {}\n", total_runs));
+        output.push_str(&format!(
+            "- **Total Distance:** {} km\n",
+            format_distance(total_distance)
+        ));
+        output.push_str(&format!(
+            "- **Total Time:** {}\n",
+            format_duration(total_time)
+        ));
+        output.push_str(&format!(
+            "- **Average Pace:** {}/km\n",
+            format_pace(avg_pace)
+        ));
+        output.push_str(&format!(
+            "- **Total Elevation Gain:** {:.0}m\n",
+            total_elevation
+        ));
+
+        // Calculate some additional statistics
+        let avg_distance = total_distance / total_runs as f64;
+        let avg_time = total_time / total_runs as i32;
+
+        output.push_str("\n## Averages per Run\n");
+        output.push_str(&format!(
+            "- **Average Distance:** {} km\n",
+            format_distance(avg_distance)
+        ));
+        output.push_str(&format!(
+            "- **Average Duration:** {}\n",
+            format_duration(avg_time)
+        ));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
     #[tool(description = "Authorize the MCP with your Strava account")]
     async fn authorize(
         &self,
@@ -435,6 +686,18 @@ struct GetRecentRunsParams {
 struct GetWeeklySummaryParams {
     #[schemars(description = "Start of week in YYYY-MM-DD format (defaults to current Monday)")]
     week_start: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetRunsForMonthParams {
+    #[schemars(description = "Month in YYYY-MM format (e.g., 2026-01)")]
+    month: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetMonthlyRunningSummaryParams {
+    #[schemars(description = "Month in YYYY-MM format (e.g., 2026-01)")]
+    month: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
